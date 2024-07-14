@@ -1,0 +1,1513 @@
+theory 5G_registration_AKA_Honest
+/*
+
+This file augments an AKA model by Hirschi et all to a full the Registration model.
+It contains UPFs, which the AKA model did not. 
+It contains PDU sessions, the AKA model did not.  The latter are restricted to one, for tractability reasons.
+
+In this file, the parties are honest, i.e., normal DY model
+
+
+
+time tamarin-prover-160 Registration5G_AKA_Honest.spthy  --heuristic=O --oraclename=oracle.py --prove  +RTS -N20 -RTS && date
+==============================================================================
+summary of summaries:
+
+analyzed: Registration5G_AKA_Honest.spthy
+
+***sanity checks  inherited from the AKA model
+  rand_autn_src (all-traces): verified (10 steps)
+  sqn_ue_src (all-traces): verified (17 steps)
+  sqn_hss_src (all-traces): verified (9 steps)
+  sqn_ue_nodecrease (all-traces): verified (1499 steps)
+  sqn_ue_unique (all-traces): verified (20 steps)
+  NotSecret_C_RNTI (exists-trace): verified (8 steps)
+  Secret_C_RNTI (all-traces): falsified - found trace (8 steps)
+  executability_honest (exists-trace): verified (26 steps)
+  executability_keyConf_honest (exists-trace): verified (28 steps)
+  executability_macfailure (exists-trace): verified (22 steps)
+  executability_desync (exists-trace): verified (35 steps)
+  executability_resync (exists-trace): verified (64 steps)
+  
+//sanity checks added to the AKA model
+  AtMostTwoUPFs (all-traces): verified (5 steps) // we restrict to at most 2 UPFs, for tractability reasons.
+
+**  reproving AKE lemmas from the AKA model, in this augmented
+    anonymous_injectiveagreement_ue_seaf_kseaf_noKeyRev_noChanRev (all-traces): verified (7068 steps)
+  
+***new security lemmas compared to the AKA model
+  correctness_UE_Reg_AKA_Honest (exists-trace): verified (64 steps)
+
+
+==============================================================================
+
+real    15m40.674s
+user    206m51.512s
+sys     67m44.404s
+Sat 18 Sep 12:57:23 BST 2021
+
+*/
+
+
+
+
+
+
+
+begin
+
+builtins:
+  symmetric-encryption, asymmetric-encryption, multiset, xor
+
+functions:
+    //UE REG Functions
+    // 3GPP KDFs [TS 33.501]
+    KDF/2, // KDF --> K_AMF, K_gNB, NH, K_gNB*
+    S_TMSI/1, // shortened version of the 5G_GUTI
+    //, PD/1 //get rid of partial deconstructions.
+
+    // AKA functions (TS 33.102)
+    f1/2,      // MAC-function --> MAC
+    f2/2,      // MAC-function --> RES
+    f3/2,      // KDF      --> CK
+    f4/2,      // KDF          --> IK
+    f5/2,      // KDF          --> AK (Hide Sqn)
+    f1_star/2, // MAC-function --> MAC-S
+    f5_star/2, // KGF      --> AKS (Hide Sqn)
+    
+    //generation K_AMF
+    KDF/2, //--> K_AMF  used K_SEAF and SUPI; k_AMF= KDF(SUPI, K_SEAF)
+
+    // 3GPP KDFs (TS 33.501)
+    SHA256/2, // KDF      --> HXRES*
+    
+    
+     SMF_ID/1, //the id of the SMF associated with a PDU session
+     
+     PDU_type/1, //the type of PDU session
+     
+     
+     incorrectPDUSession/5, //will work out whether the PDU Sessions at the UPF are correct for the UE in question
+     
+    //Partial Deconstruction Typing
+    GUTI_Type/1,
+    RAN_UENGAP_ID_Type/1,
+    RAND_Type/1,
+    AMF_UE_NGAP_ID_Type/1,
+    PDUSESSION_Type/2,
+    UE_ADDRESS_Type/1,
+    TE_ID_Type/1,
+    InternetRequest/4,
+    InternetRequestFwd/6,
+    InternetResponse/6,
+    InternetResponseFwd/4,
+    OTA_CHANNEL/2,
+    PartDec/2
+
+
+equations:  
+        incorrectPDUSession(result,pdu_id, type_val, pdu_id, type_val) = result
+
+/************************************/
+/*     Restrictions / Axioms        */
+/************************************/
+
+restriction not_equal:
+  "All a #i. NEq(a, a)@i ==> F"
+  
+restriction equal:
+  "All a b #i. Eq(a, b)@i ==> (a = b)"
+
+restriction subscribe_once:
+    " All HN1 HN2 supi #i #j. Subscribe(supi, HN1)@i & Subscribe(supi, HN2)@j ==> (#i = #j & HN1 = HN2)"
+    
+    
+
+restriction OnlyOneNetwork:
+  " All p q #i #j. OnlyOneNetwork(p, q)@i & OnlyOneNetwork(p, q)@j ==> #i = #j "
+
+restriction GUTInotSUPI:
+  " All p #i #j. GUTI(p)@i & SUPI(p)@j ==> F "
+
+//we will only have 2 UPFs to start with
+restriction OnlyTwoUPFs:
+ "All p q r #i #j #k . 
+    UserPlaneFunction(p) @ i & UserPlaneFunction(q) @ j & UserPlaneFunction(r) @ k 
+    ==>
+    (#i=#j) | (#i=#k) | (#j=#k)
+"
+
+//Checks the freshness of the SQNs
+restriction greater_or_equal_than:
+   " All x y #i. Greater_Or_Equal_Than(x,y)@i ==> not (Ex z. x + z = y) "
+   
+
+
+
+/***********************************/
+/*         Secure Channels         */
+/***********************************/
+rule send_secure:
+    [ SndS(~cid,A,B,m) ]
+    -->
+    [ Sec(~cid,A,B,m) ]
+
+rule receive_secure:
+    [ Sec(~cid,A,B,m) ]
+    -->
+    [ RcvS(~cid,A,B,m) ]
+
+rule secureChannel_compromised_in:
+  // An attacker can learn cid with secureChannel_compromised_out
+  [ In(<~cid,A,B,x>) ]
+--[ Rev(A,'secureChannel')
+  , Injected(x)
+  ]->
+  [ Sec(~cid,A,B,x) ]
+
+rule secureChannel_compromised_out:
+  [ Sec(~cid,A,B,m) ]
+--[ Rev(B,'secureChannel') ]->
+  [ Out(<~cid,m>) ]
+  
+/************************************/
+/*       Initialization Rules       */
+/************************************/
+
+// Initialize a serving network or SNet
+rule init_servNet:
+    let 
+        SNetID = <'5G', ~idSNet>
+    in
+    [ Fr(~idSNet) ] // idSN denotes VPLMNID
+    --[ ServNet(~idSNet)
+       , OnlyOnce('Init', 'init_servNet')
+       ]->
+    [!Seaf(~idSNet, SNetID)
+    , Out(SNetID)]
+
+// For AKA: Initialize a home network or HNet
+rule init_homeNet:
+    [Fr(~sk_HNet),
+      Fr(~idHNet)]
+    --[ HomeNet(~idHNet)
+       , OnlyOnce('Init','init_homeNet')]->
+    [!HSS(~idHNet, ~sk_HNet),
+     !Pk(~idHNet, pk(~sk_HNet)),
+     Out(<~idHNet, pk(~sk_HNet)>)]
+
+
+// For Reg primarily: Initialize the Core  (CN) of Networks : AMF + SMF 
+// (the UPF is created seperately)
+
+rule init_CN:
+  [ Fr(~CN_ID) ]
+--[ CoreNetwork(~CN_ID)
+    , OnlyOnce('Init','init_CN')]->
+  [ !CN(~CN_ID)
+  , Out(~CN_ID) ]
+
+
+
+// We need to create a number of UPFs 
+rule init_UPF:
+  [ Fr(~UPF_ID) ]
+--[ UserPlaneFunction(~UPF_ID) ]->
+  [ !UPF(~UPF_ID)
+  , Out(~UPF_ID) ]
+
+
+// Initialize an honest Radio Access Network (RAN)
+rule init_RAN_honest:
+    let 
+        state='honest'
+    in
+    [ 
+        Fr(~RAN_ID)
+    ]
+    --[ 
+          RadioAccessNetwork(~RAN_ID)
+        , RANState(~RAN_ID, state)
+    ]->
+    [ 
+      !NG_RAN(~RAN_ID)
+    , !NG_RAN_STATE(~RAN_ID, state)
+    , Out(~RAN_ID) 
+    ]
+    
+
+ //UE-created with PDU sessions populated
+rule add_subscription: 
+
+    let
+        //we always start with a PDU session of Type '1'
+        //the core will update this...
+        PDU_session1=PDUSESSION_Type(~pdu1, '1')
+    in
+ 
+    [
+     Fr(~supi),
+     Fr(~k),
+     Fr(~sqn_root),
+     !HSS(~idHN, ~sk_HN)
+    , Fr (~5G_GUTI)
+    , !CN(~CN_ID)
+    , Fr(~pdu1)
+    ]
+    
+    --[
+        // Restriction
+        Subscribe(~supi, ~idHN),
+
+        // Helper lemmas
+        Sqn_Create(~supi, ~idHN, ~sqn_root),
+        CreateUser(~supi, ~k, ~idHN),
+        
+        //we have create a UE
+        UserEquipment(~supi)
+    ]->
+    [
+     !Ltk_Sym(~supi, ~idHN, ~k, ~sqn_root)
+     , Sqn_UE(~supi, ~idHN, ~sqn_root+'1', ~sqn_root, '1')
+     , Sqn_HSS(~supi, ~idHN, ~sqn_root+'1', ~sqn_root, '1')
+     , !PDUSessionCreated(~supi, ~5G_GUTI, ~CN_ID, PDU_session1) // persistent fact needed for executability_resync
+    ]
+
+
+// Initialize an N2/N3/N4 interface between a RAN and the CN (AMF/SMF) and the UPF
+// N2: RAN - AMF (CN)
+// N3: RAN - UPF 
+// N4: SMF (CN) - UPF
+rule connect_networks_N2:
+  [ !NG_RAN(~RAN_ID)
+  , !CN(~CN_ID)
+  , Fr(~cid_N2)]
+--[ OnlyOneNetwork(~RAN_ID, ~CN_ID) ]->
+  [ !N2(~cid_N2, ~RAN_ID, ~CN_ID)]
+
+rule connect_networks_N3:
+  [ !NG_RAN(~RAN_ID)
+  , !UPF(~UPF_ID)
+  , Fr(~cid_N3)]
+--[ OnlyOneNetwork(~RAN_ID, ~UPF_ID) ]->
+  [ !N3(~cid_N3, ~RAN_ID, ~UPF_ID)]
+
+rule connect_networks_N4:
+  [ !CN(~CN_ID)
+  , !UPF(~UPF_ID)
+  , Fr(~cid_N4)]
+--[ OnlyOneNetwork(~CN_ID, ~UPF_ID) ]->
+  [ !N4(~cid_N4, ~CN_ID, ~UPF_ID)]
+
+
+
+
+/************************************/
+/*       Sync. Failure              */
+/************************************/
+// We only allow the Sqn to increase, as a decrease would
+// trivially violate injectivity
+rule ue_sqn_increase:
+    [Sqn_UE(~supi, ~idHNet, Sqn, ~sqn_root, count),
+     In(m)]
+    --[
+        // Open chains
+        Sqn_UE_Invariance(~supi, ~idHNet, Sqn+m, ~sqn_root, count+m),
+        Eq(Sqn+m,~sqn_root+count+m),
+
+        // Helper lemmas
+        Sqn_UE_Change(~supi, ~idHNet, Sqn+m),
+
+        // Executability
+        Sqn_UE_Desync()
+    ]->
+    [Sqn_UE(~supi, ~idHNet, Sqn+m, ~sqn_root, count+m)]
+    
+    
+/************************************/
+/*         Key Leakage              */
+/************************************/
+
+// NOTE: Rules for compromised channel between SEAF and HSS are defined above.
+
+// Compromised subscriptions (symmetric key k)
+rule reveal_Ltk_Sym:
+    [!Ltk_Sym(~supi, ~idHNet, ~k, ~sqn_root)]
+    --[
+        // Security properties
+        Rev(~supi, <'k', ~k>),
+        Rev(~idHNet, <'k', ~k>)
+    ]->
+    [Out(~k)]
+
+// Compromised subscriptions ("initial" counter sqn_root)
+rule reveal_Ltk_Sqn:
+    [!Ltk_Sym(~supi, ~idHNet, ~k, ~sqn_root)]
+    --[
+        // Security properties
+        Rev(~supi, <'sqn', ~sqn_root>),
+        Rev(~idHNet, <'sqn', ~sqn_root>)
+    ]->
+    [Out(~sqn_root)]
+
+// Compromised subscriptions (identifier supi)
+rule reveal_Ltk_supi:
+    [!Ltk_Sym(~supi, ~idHNet, ~k, ~sqn_root)]
+    --[
+        // Security properties
+        Rev(~supi, <'supi', ~supi>),
+        Rev(~idHNet, <'supi', ~supi>)
+    ]->
+    [Out(~supi)]
+
+// Compromised home network (private asymmetric key sqn_HN)
+rule reveal_sk_HN:
+    [!HNet(~idHNet, ~sk_HNet)]
+    --[
+        // Security properties
+        Rev(~idHNet, <'skHN', ~sk_HNet>)
+    ]->
+    [Out(~sk_HNet)]    
+
+/************************************/
+/*       Procedure Rules            */
+/************************************/
+
+
+// UE sends it registration request
+// to a source node SN inside the home network
+rule UE_Preamable:
+    let 
+        PDU_session1=PDUSESSION_Type(~pdu1, type_val1)
+        ZCS='ZadoffChuSequence'
+    in
+    [
+          !PDUSessionCreated(~SUPI, ~5G_GUTI, ~CN_ID, PDU_session1) // persistent fact needed for executability_resync
+        , !CN(~CN_ID)
+        , !NG_RAN(~SRAN_ID) 
+        , Fr(~RA_RNTI)
+    ]
+  
+    --[ 
+        SendPreamble(~SUPI, ~SRAN_ID)
+        , GUTI(~5G_GUTI)
+        , SUPI(~SUPI)
+        , OnlyOnce('Reg', 'UE_SendPreamable')
+    ]->
+  
+    [
+        Out(<~RA_RNTI, ~SRAN_ID, 'Preamble', ZCS>)
+        , St1_UE(~SUPI, ~CN_ID,  ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, PDU_session1)
+        ,UE_Org_PDUSession(~SUPI,   ~5G_GUTI, ~pdu1, type_val1)
+    ]
+
+rule SRAN_RAR:
+    let 
+        ZCS='ZadoffChuSequence'
+    in
+    [
+        In(<RA_RNTI, ~SRAN_ID, 'Preamble', ZCS>)
+        , !NG_RAN(~SRAN_ID)
+        , Fr(~C_RNTI)
+    ]
+    --[
+       SendCRNTI(~SRAN_ID, ~C_RNTI)
+       , OnlyOnce('Reg', 'SRAN_SendRAR')
+    ]->
+    
+    [
+        Out(<~SRAN_ID, senc(<'RAR', ~C_RNTI>, RA_RNTI)>)
+        , St1_SRAN(~SRAN_ID, RA_RNTI, ~C_RNTI)
+    ]
+    
+    
+rule UE_SetupRequest:
+    let
+        estClause='establishmentClause'
+    in
+    [
+        In(<~SRAN_ID, senc(<'RAR', C_RNTI>, ~RA_RNTI)>)
+        , Fr(~UE_ID)//random number between 0 & 2^39-1
+        , St1_UE(~SUPI, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, PDU_session1)
+    ]
+    --[
+        CreateUEID(~UE_ID, C_RNTI)
+        , OnlyOnce('Reg', 'UE_SendSetupRequest')
+    ]->
+    [
+        Out(<~RA_RNTI, ~SRAN_ID,'SetupReq', ~UE_ID, estClause>)
+        , St2_UE(~SUPI, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDU_session1)
+    ]
+    
+rule SRAN_RRCSetup:
+    let
+        estClause='establishmentClause'
+        RRCConfig='RRC_Connected_OK'
+    in
+    [
+        In(<RA_RNTI, ~SRAN_ID,'SetupReq', UE_ID, estClause>)
+        , St1_SRAN(~SRAN_ID, RA_RNTI, ~C_RNTI)
+    ]
+    --[
+        RRCSetupComplete(~SRAN_ID, ~C_RNTI, UE_ID)
+        , OnlyOnce('Reg', 'SN_SendRRCSetup')
+    ]->
+    
+    [
+        Out(<~SRAN_ID, senc(RRCConfig,~C_RNTI)>)
+        , St2_SRAN(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID)
+    ]
+
+rule UE_RRCSetupComplete_NASRegReq:
+    let
+        RRCConfig='RRC_Connected_OK'
+        RRCSetupComplete='RRCSetupComplete_NASRegReq'
+        UECapabilities='UECapabilities'
+        PDUSessions=<PDU_session1> //there could be more than one but we only model one
+        NASRegReqMsg=<GUTI_Type(~5G_GUTI),UECapabilities,PDUSessions>
+    in
+    [
+        In(<~SRAN_ID, senc(RRCConfig,C_RNTI)>)
+        , St2_UE(~SUPI, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID,PDU_session1)
+    ]
+    
+    --[
+        NASRegReq(~SUPI, ~5G_GUTI)
+        // Sources
+        , GUTI_SND(~5G_GUTI)
+        , OnlyOnce('Reg','UE_RRCSetupComplete_NASRegReq')
+    ]->
+    
+    [
+        Out(<~RA_RNTI, ~SRAN_ID, RRCSetupComplete, NASRegReqMsg >)
+        , St3_UE(~SUPI, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDUSessions)
+    ]
+
+rule SRAN_AMFSelection:
+    let
+        RRCSetupComplete='RRCSetupComplete_NASRegReq'
+        UECapabilities='UECapabilities'
+
+        NASRegReqMsg=<GUTI_Type(5G_GUTI),UECapabilities, PDUSessions>
+        STMSI=S_TMSI(5G_GUTI)
+        msgOut=<'Reg_IDReq',RAN_UENGAP_ID_Type(~RAN_UENGAP_ID), STMSI, NASRegReqMsg>
+    in
+    [
+        In(<RA_RNTI, ~SRAN_ID, RRCSetupComplete, NASRegReqMsg >)
+        , Fr(~RAN_UENGAP_ID)
+        , St2_SRAN(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID)
+        , !N2(~cid_N2, ~SRAN_ID, ~CN_ID)
+    ]
+    
+    --[
+        AMFSelection(~SRAN_ID, 5G_GUTI)
+        , OnlyOnce('Reg','SN_AMFSelection')
+        // Sources
+        , GUTI_RCV(5G_GUTI)
+        , RAN_UENGAP_ID_SND(~RAN_UENGAP_ID)
+    ]->
+    
+    [
+        St3_SRAN(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID)
+        , SndS(~cid_N2, ~SRAN_ID, ~CN_ID, msgOut)
+    ]
+    
+rule AMF_IdentityRequest:
+    let
+        NASRegReqMsg=<GUTI_Type(5G_GUTI),UECapabilities,PDUSessions>
+        STMSI=S_TMSI(5G_GUTI)
+        msgIn=<'Reg_IDReq', RAN_UENGAP_ID_Type(RAN_UENGAP_ID), STMSI, NASRegReqMsg>
+        NASIDRequest='NAS_ID_Request'
+        msgOut=<'NAS_ID_REq',RAN_UENGAP_ID_Type(RAN_UENGAP_ID), GUTI_Type(5G_GUTI), NASIDRequest>
+        
+    in
+    [ 
+        !N2(~cid_N2, ~SRAN_ID, ~CN_ID)
+        , RcvS(~cid_N2, ~SRAN_ID, ~CN_ID, msgIn)
+    ]
+    
+    --[
+        AMF_RequestID(~SRAN_ID, 5G_GUTI)
+        , OnlyOnce('Reg', 'AMF_IdentityRequest')
+        // Sources
+        , GUTI_RCV(5G_GUTI)
+        , RAN_UENGAP_ID_RCV(RAN_UENGAP_ID)
+    ]->
+    
+    [
+        SndS(~cid_N2, ~CN_ID, ~SRAN_ID, msgOut)
+        , St1_CN(~CN_ID, ~SRAN_ID, 5G_GUTI, RAN_UENGAP_ID, PDUSessions) //link to the HNet entry point in AKA
+    ]
+rule SRAN_FWdIdentityRequest:
+    let 
+        
+        NASIDRequest='NAS_ID_Request'
+        msgIn=<'NAS_ID_REq', RAN_UENGAP_ID_Type(~RAN_UENGAP_ID), GUTI_Type(5G_GUTI), NASIDRequest>
+        
+        msgOut='IdentityRequest'
+    in
+    [
+        RcvS(~cid_N2, ~CN_ID, ~SRAN_ID, msgIn)
+        ,!N2(~cid_N2, ~SRAN_ID, ~CN_ID)
+        , St3_SRAN(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID)
+    ]
+    
+    --[
+        FwdIdentityReq(~SRAN_ID, 5G_GUTI)
+        , OnlyOnce('Reg','SN_FWdIdentityRequest')
+        //Sources
+        , RAN_UENGAP_ID_RCV(~RAN_UENGAP_ID)
+    ]->
+    
+    [
+        Out(<~SRAN_ID, RA_RNTI, msgOut>)
+        , St4_SRAN_inReg_preAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID) //the state of the gNB radio node that facilitated registration for a UE, right before AKA  starts
+    ]
+
+/************************************/
+/*       AKA Rules                  */
+/************************************/
+
+rule ue_send_attachReq:
+    let
+        msgIn='IdentityRequest'
+        suci = < aenc{<~supi, ~R>}pk_HN, ~idHN>
+        msg = suci
+    in
+    [
+    In(<~SRAN_ID, ~RA_RNTI, msgIn>),
+    St3_UE(~supi, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID,PDUSessions),
+    !Ltk_Sym(~supi, ~idHN, ~k, ~sqn_root),
+     !Pk(~idHN, pk_HN),
+     Fr(~R),
+     Fr(~tid)]
+    --[
+        // Executability
+        Start_UE_Session(~supi),
+        OnlyOnce('AKA', 'ue_send_attachReq')
+    ]->
+    [St_1_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root),
+     St4_UE_inReg_preAKA(~supi, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDUSessions), // end of pre-AKA registration for UE
+     Out(msg)]
+
+// Attach Request + Authentication Initiation Request (AIR)
+rule seaf_receive_attachReq_send_air:
+    let
+        suci = <conc_supi,  idHN>
+        msg = <suci, SNID >
+
+    in
+    [!Seaf(~idSN, SNID),
+     Fr(~tid),
+     Fr(~cid),   
+     In(suci)]
+    --[
+        // Executability
+        Start_SEAF_Session(~idSN),
+        OnlyOnce('AKA', 'seaf_receive_attachReq_send_air')
+    ]->
+    [St_1_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~cid),
+     SndS(~cid, ~idSN, idHN, <'air', msg>)]
+
+// Authentication Initiation Request (AIR) + 5G Authentication Initiation Answer (5G-AIA)
+rule hss_receive_air_send_aia:
+    let
+            // 1. Receive
+        conc_supi = aenc{<~supi, ~R>}pk(~sk_HN)
+        suci = <conc_supi, ~idHN>
+        SNID = <'5G', idSN> // HSS checks that the received SNID matches the authenticated channel with idSN
+        msgIn = <suci, SNID >
+        SqnNext = SqnHSS + '1'
+        
+        // 2. Send
+        //     a. ARPF part
+        MAC = f1(~k, <SqnNext, ~RAND, SNID>)
+        XRES = f2(~k, ~RAND)
+        CK = f3(~k, ~RAND)
+        IK = f4(~k, ~RAND)
+        AK = f5(~k, ~RAND)
+        AUTN = <SqnNext XOR AK, MAC>
+        K_seaf = KDF(KDF(<CK, IK>, <SNID, SqnNext XOR AK>), SNID)
+        XRES_star = KDF(<CK, IK>, <SNID, XRES, ~RAND>)
+
+        //     b. AUSF part
+        HXRES_star = SHA256(XRES_star, ~RAND)
+        5G_AV = < ~RAND, HXRES_star, K_seaf, AUTN >
+
+        msgOut = 5G_AV
+        in
+    [!HSS(~idHN, ~sk_HN),
+     RcvS(~cid, idSN, ~idHN, <'air', msgIn>),
+     !Ltk_Sym(~supi, ~idHN, ~k, ~sqn_root),
+     Sqn_HSS(~supi, ~idHN, SqnHSS, ~sqn_root, count),
+     Fr(~RAND),
+     Fr(~tid),
+     In(count)]
+    --[
+        // Open chains
+        Sqn_HSS_Invariance(~idHN, ~supi, SqnNext, ~sqn_root, count+'1'),
+        Src(~RAND, AUTN),
+        Eq(SqnNext,~sqn_root+ count+'1'),
+
+        // Helping
+        KSEAF(K_seaf),
+        
+        // Executability
+        Start_HSS_Session(~idHN),
+        HSS_Send_Aia(),
+        OnlyOnce('AKA', 'hss_receive_air_send_aia'),
+
+        // Security properties
+        Running(~idHN, idSN,<'SEAF','HSS',<'K_Seaf', K_seaf>>),
+        Running(~idHN, idSN,<'SEAF','HSS',<'supi', ~supi>>),
+        Running(~idHN, idSN,<'SEAF','HSS',<'RES_star', XRES_star>>),
+        Running(~idHN, ~supi,<'UE','HSS', <'K_Seaf', K_seaf>>),
+        Running(~idHN, ~supi,<'UE','HSS',<'supi', ~supi>>),
+        Running(~idHN, ~supi,<'UE','HSS',<'AUTN', AUTN>>),
+        Honest(~supi),
+        Honest(~idHN),
+        Honest(idSN)
+    ]->
+    [St_1_HSS(~tid, ~idHN, ~supi, suci, idSN, SNID, ~k, SqnNext, XRES_star, ~RAND, ~sqn_root, ~sk_HN, ~cid),
+         Sqn_HSS(~supi, ~idHN, SqnNext, ~sqn_root, count+'1'),
+         SndS(~cid, ~idHN, idSN, <'aia', msgOut>)]
+
+
+// 5G Authentication Initiation Answer (5G-AIA) + Authentication Request (Auth-Req)
+rule seaf_receive_aia_send_authReq:
+    let
+        5G_AV = < RAND, HXRES_star, K_seaf, AUTN >
+        msgIn = 5G_AV
+        msgOut = < RAND, AUTN, SNID >
+        in
+    [St_1_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~cid),
+     RcvS(~cid, idHN, ~idSN, <'aia', msgIn>)]
+    --[
+        // Open chains
+        Out_Src(RAND, AUTN),
+        //Executability
+        SendAuthReq(msgOut),
+        OnlyOnce('AKA', 'seaf_receive_aia_send_authReq'),
+
+                // Security properties
+        Running(~idSN, idHN, <'HSS','SEAF', <'K_Seaf', K_seaf>>),
+        Running_anonymous(~idSN, <'UE','SEAF', <'K_Seaf', K_seaf>>)
+    ]->
+    [St_2_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, RAND, HXRES_star, K_seaf, ~cid)
+    , Out(msgOut)]
+
+
+// Authentication Request (Auth-Req) + Authentication Response (Auth-Resp)
+rule ue_receive_authReq_freshness_success_send_authResp:
+    let
+        // Input, checks
+        SqnHSS = SqnUE + dif // check freshness
+        AK = f5(~k, RAND)
+        SNID = <'5G', idSN>
+        MAC = f1(~k, <SqnHSS, RAND, SNID>) // check on the MAC
+        AUTN = <SqnHSS XOR AK, MAC>
+        msgIn = < RAND, AUTN, SNID >
+        // Output
+        RES = f2(~k, RAND)
+        IK = f4(~k, RAND)
+        CK = f3(~k, RAND)
+        RES_star = KDF(<CK, IK>, <SNID, RES, RAND>)
+        K_seaf = KDF(KDF(<CK, IK>, <SNID, SqnHSS XOR AK>), SNID)
+        msgOut = RES_star
+    in
+    [St_1_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root),
+     Sqn_UE(~supi, ~idHN, SqnUE, ~sqn_root, count),
+     In(msgIn)]
+    --[
+        // Open chains
+        Sqn_UE_Invariance(~supi, ~idHN, SqnHSS, ~sqn_root, count+dif),
+        Eq(SqnHSS,~sqn_root+count+dif),
+        // Helper lemmas
+        Sqn_UE_Change(~supi, ~idHN, SqnHSS),
+        Sqn_UE_Use(~supi, ~idHN, SqnHSS),
+        KSEAF(K_seaf),
+        //Executability
+        SendAuthResp(msgOut),
+        OnlyOnce('AKA', 'ue_receive_authReq_freshness_success_send_authResp'),
+
+        // Security properties
+        Running(~supi, idSN,<'SEAF','UE',<'RES_star', RES_star>>),
+        Running(~supi, idSN,<'SEAF','UE',<'K_Seaf', K_seaf>>),
+        Running(~supi, idSN,<'SEAF','UE',<'supi', ~supi>>),
+        Running(~supi, ~idHN, <'HSS','UE', <'K_Seaf', K_seaf>>),
+        Running(~supi, ~idHN, <'HSS','UE', <'RAND', RAND>>),
+        Secret_AKA(<'UE', ~supi>, 'key', K_seaf),
+        Secret_AKA(<'UE', ~supi>, 'supi', ~supi),
+        Commit(~supi, ~idHN, <'UE','HSS',<'AUTN', AUTN>>),
+        Commit(~supi, ~idHN, <'UE','HSS',<'supi', ~supi>>),
+        Commit(~supi, ~idHN, <'UE','HSS', <'K_Seaf', K_seaf>>),
+        Commit(~supi, idSN, <'UE','SEAF',<'K_Seaf', K_seaf>>),
+        Commit(~supi, idSN, <'UE','SEAF',<'RAND', RAND>>),
+        Honest(~supi),
+        Honest(~idHN),
+        Honest(idSN)        
+    ]->
+    [St_2_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root, idSN, K_seaf),
+     Out(msgOut),
+     Sqn_UE(~supi, ~idHN, SqnHSS, ~sqn_root, count+dif)]
+
+rule ue_receive_authReq_freshness_mac_failure:
+    let
+        // Input, checks
+        SqnHSS = SqnUE + dif // check freshness
+        AK = f5(~k, RAND)
+        SNID = <'5G', idSN>
+        
+        AUTN = <SqnHSS XOR AK, MAC>
+        msgIn = < RAND, AUTN, SNID >
+        // Output
+        msgOutAuthResp='MACfail'
+    in
+    [St_1_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root),
+     Sqn_UE(~supi, ~idHN, SqnUE, ~sqn_root, count),
+     In(msgIn)]
+    --[
+        // Open chains
+        Sqn_UE_Invariance(~supi, ~idHN, SqnHSS, ~sqn_root, count+dif),
+        Eq(SqnHSS,~sqn_root+count+dif),
+        // Helper lemmas
+        Sqn_UE_Change(~supi, ~idHN, SqnHSS),
+        Sqn_UE_Use(~supi, ~idHN, SqnHSS),
+
+        //Executability
+        MACFailure(~supi),
+        OnlyOnce('AKA', 'ue_receive_authReq_freshness_mac_failure'),
+        
+        // MAC failure
+        NEq(MAC, f1(~k, <SqnHSS, RAND, SNID>))
+    ]->
+    [
+        St_2_UE_failMac(~tid, ~supi, ~idHN, ~k, ~sqn_root, idSN),
+        Out(msgOutAuthResp)
+    ]
+
+
+
+// Authentication Request (Auth-Req) and Sync Failure
+rule ue_receive_authReq_fail_freshness_send_sync_failure:
+    let
+        // Input, checks
+        AK = f5(~k, RAND)
+        SNID = <'5G', idSN>
+        MAC = f1(~k, <SqnHSS, RAND, SNID>) // check on the MAC
+        AUTN = <SqnHSS XOR AK, MAC>
+        msgIn = < RAND, AUTN, SNID >
+        // Output
+        AKS = f5_star(~k, RAND)
+        MACS = f1_star(~k, <SqnUE, RAND>)
+        AUTS = <SqnUE XOR AKS, MACS >
+        out_msg = AUTS
+    in
+    [St_1_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root),
+     Sqn_UE(~supi, ~idHN, SqnUE, ~sqn_root, count),
+     In(msgIn),
+     In(count)]     // necessary to avoid open chains
+    --[
+        // Restriction
+        Greater_Or_Equal_Than(SqnUE, SqnHSS), // Check freshness (FAIL)
+
+        // Open chains
+        Sqn_UE_Invariance(~supi, ~idHN, SqnUE, ~sqn_root, count),
+        Eq(SqnUE,~sqn_root+count),
+        //Executability
+        OnlyOnce('AKA', 'ue_receive_authReq_fail_freshness_send_sync_failure'),
+
+        // Helper lemmas
+        Sqn_UE_Nochange(~supi, ~idHN, SqnUE)
+    ]->
+    [Out(out_msg),
+     Sqn_UE(~supi, ~idHN, SqnUE, ~sqn_root, count)]
+
+// Authentication Response (Auth-Resp) + 5G Authentication Confirmation (5G-AC)
+rule seaf_receive_authResp_send_ac:
+    let
+        HXRES_star = SHA256(RES_star, RAND)
+        suci = <conc_supi,  idHN>
+        msgOut = < RES_star, suci, SNID >
+    in
+    [St_2_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, RAND, HXRES_star, K_seaf, ~cid),
+     In(RES_star)]
+    --[
+        //Executability
+        SendSuci(suci),
+        OnlyOnce('AKA', 'seaf_receive_authResp_send_ac'),
+        // Security properties
+        Running(~idSN, idHN, <'HSS','SEAF', <'RES_star', RES_star>>)
+    ]->
+    [St_3_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, RAND, RES_star, K_seaf, ~cid),
+    SndS(~cid, ~idSN, idHN, <'ac', msgOut>)]
+
+
+// Synchronization Failure and 5G Authentication Synchronization message
+rule seaf_receive_syncFailure_send_authSync:
+    let
+        AUTS = < SqnUEXorAKS, MACS >
+        out_msg = < RAND, AUTS >
+    in
+    [St_2_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, RAND, HXRES_star, K_seaf, ~cid),
+     In(AUTS)]
+    --[
+        //Executability
+        OnlyOnce('AKA', 'seaf_receive_syncFailure_send_authSync')    
+    ]->
+    [SndS(~cid, ~idSN, idHN, <'resync', out_msg>)]
+
+// 5G Authentication Confirmation (5G-AC) + Authentication Confirmation Answer (5G-ACA)
+rule hss_receive_ac_send_aca:
+    let
+        SNID = <'5G', idSN>
+        CK = f3(~k, ~RAND)
+        IK = f4(~k, ~RAND)
+        AK = f5(~k, ~RAND)
+        K_seaf = KDF(KDF(<CK, IK>, <SNID, Sqn XOR AK>), SNID)
+        msgIn = < XRES_star, suci, SNID >
+
+        msgOut = <'confirm', ~supi>
+    in
+    [St_1_HSS(~tid, ~idHN, ~supi, suci, idSN, SNID, ~k, Sqn, XRES_star, ~RAND, ~sqn_root, ~sk_HN, ~cid),
+     RcvS(~cid, idSN, ~idHN, <'ac',msgIn>)]
+    --[
+        // Executability
+        HSS_End(),
+        SendSupi(~supi, suci) ,
+        OnlyOnce('AKA', 'hss_receive_ac_send_aca'),
+        
+        // Security properties
+        Secret_AKA(<'HSS', ~idHN>, 'key', K_seaf),
+        Commit(~idHN, idSN, <'HSS','SEAF', <'K_Seaf', K_seaf>>),
+        Commit(~idHN, idSN, <'HSS','SEAF', <'RES_star', XRES_star>>),
+        Commit(~idHN, ~supi, <'HSS','UE', <'K_Seaf', K_seaf>>),
+        Commit(~idHN, ~supi, <'HSS','UE', <'RAND', ~RAND>>),
+        Honest(~idHN),
+        Honest(~supi),
+        Honest(idSN)
+    ]->
+    [SndS(~cid, ~idHN, idSN, <'aca', msgOut>)]
+
+
+// 5G Authentication Synchronization message
+rule hss_receive_authSync:
+    let
+        SqnUE = dif + SqnHSS // check that SqnUE > SqnHSS
+        AKS = f5_star(~k, ~RAND)
+        MACS = f1_star(~k, <SqnUE, ~RAND>)
+        AUTS = <SqnUE XOR AKS, MACS >
+        msg = < ~RAND, AUTS >
+
+    in
+    [St_1_HSS(~tid, ~idHN, ~supi, suci, idSN, SNID, ~k, SqnHSS, XRES_star, ~RAND, ~sqn_root, ~sk_HN, ~cid),
+     Sqn_HSS(~supi, ~idHN, SqnHSS, ~sqn_root, count),
+     RcvS(~cid, idSN, ~idHN, <'resync', msg>),
+     In(count+dif)]
+    --[
+        // Open chains
+        Sqn_HSS_Invariance(~idHN, ~supi, SqnUE, ~sqn_root, count+dif),
+        Eq(SqnUE,~sqn_root+count+dif), //get rid of the associate source lemma
+        // Executability
+        HSS_Resync_End(count+dif),
+        OnlyOnce('AKA', 'hss_receive_authSync')
+    ]->
+    [Sqn_HSS(~supi, ~idHN, SqnUE, ~sqn_root, count+dif)]
+
+
+
+//This is the point at which the serving network has received the
+//confirmation that the UE got successfully authenticated.
+// Authentication Confirmation Answer (5G-ACA)
+rule seaf_receive_aca:
+        let
+        SNID = <'5G', ~idSN>
+        msgIn = <'confirm', supi>
+    in
+        [St_3_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf, ~cid),
+     RcvS(~cid, idHN, ~idSN, <'aca', msgIn>)]
+    --[
+        // Executability
+        SEAF_End(),
+        SEAF_SEnds(K_seaf),
+        OnlyOnce('AKA', 'seaf_receive_aca'),
+        
+        // Security properties
+        Running(~idSN, supi,<'UE','SEAF',<'K_Seaf', K_seaf>>),
+        Running(~idSN, supi,<'UE','SEAF',<'supi', supi>>),
+        Running(~idSN, supi,<'UE','SEAF',<'snname', ~idSN>>),
+        Secret_AKA(<'SEAF', ~idSN>, 'key', K_seaf),
+        Commit(~idSN, idHN, <'SEAF','HSS', <'K_Seaf', K_seaf>>),
+        Commit(~idSN, idHN, <'SEAF','HSS', <'supi', supi>>),
+        Commit(~idSN, idHN, <'SEAF','HSS', <'RES_star', RES_star>>),
+        Commit(~idSN, supi, <'SEAF','UE', <'K_Seaf', K_seaf>>),
+        Commit(~idSN, supi, <'SEAF','UE', <'supi', supi>>),
+        Commit(~idSN, supi, <'SEAF','UE', <'RES_star', RES_star>>),
+        Honest(supi),
+        Honest(idHN),
+        Honest(~idSN)
+    ]->
+    [St_4_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf, supi, ~cid),
+     Out(f1(K_seaf, 'SEAF'))] // Key confimration message with UE
+
+
+
+// Key confirmation between SEAF and UE (in order to model 'implicit authentication')
+rule ue_key_confirmation:
+        [
+        St_2_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root, idSN, K_seaf),
+        In(f1(K_seaf, 'SEAF'))
+        ]
+        --[
+        // Executability
+        UE_Receives(K_seaf),
+         OnlyOnce('AKA', 'ue_key_confirmation'),
+         
+        // Security properties (after key confirmation)
+        CommitConf(~supi, ~idHN, <'UE','HSS', <'K_Seaf', K_seaf>>),
+        CommitConf(~supi, ~idHN, <'UE','HSS', <'supi', ~supi>>),
+        CommitConf(~supi, idSN, <'UE','SEAF',<'K_Seaf', K_seaf>>),
+        CommitConf(~supi, idSN, <'UE','SEAF',<'supi', ~supi>>),
+        CommitConf(~supi, idSN, <'UE','SEAF',<'snname', idSN>>),
+        Honest(~supi),
+        Honest(~idHN),
+        Honest(idSN)        
+    ]->
+    [
+    St_3_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root, idSN, K_seaf),    //successful end of AKA for the UE
+    Out(f1(K_seaf, 'UE'))
+    ]
+
+rule seaf_key_confirmation_check:
+    [
+      St_4_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf,supi,~cid)
+    , In(f1(K_seaf, 'UE'))
+    ]
+    --[
+        // Executability
+         OnlyOnce('AKA', 'seaf_key_confirmation_check'),
+        // Security properties
+        CommitConf(~idSN, idHN, <'SEAF','HSS', <'K_Seaf', K_seaf>>),
+        CommitConf(~idSN, idHN, <'SEAF','HSS', <'supi', supi>>),
+        CommitConf(~idSN, supi, <'SEAF','UE', <'K_Seaf', K_seaf>>),
+        CommitConf(~idSN, supi, <'SEAF','UE', <'supi', supi>>),
+        Honest(supi),
+        Honest(idHN),
+        Honest(~idSN),
+        SEAF_EndConf()
+    ]->
+    [
+     St_5_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf,supi,~cid, 'endAKA')
+    ]
+
+rule CN_reallocate_PDU_sessions:
+        let 
+         PDU_session1=PDUSESSION_Type(pdu1, type_val1)
+         PDUSessions=<PDU_session1>
+         //we simply alter the type value to model the reallocation
+         PDU_session1_new=PDUSESSION_Type(pdu1, type_val1+'1')
+         PDUNewSessions=<PDU_session1_new> //again there might be more than one but we only model one
+        in
+        [
+         St_5_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf,supi,~cid, 'endAKA')
+         , St1_CN(~CN_ID, ~SRAN_ID, 5G_GUTI, RAN_UENGAP_ID, PDUSessions)
+         //see comments in the 5G StandAlone Registration.pdf (state 67/68/69)
+         //for the PDU sessions we associate:
+         //a random UPF
+         , !UPF(~UPF_ID)
+          //a UE end address and 
+          , Fr(~ue_address) //see comments in 
+         //an address or the the UPF
+          , Fr(~te_id)
+          //we need to send the UPF this info over N4
+          , !N4(~cid_N4, ~CN_ID, ~UPF_ID)
+        ]
+        --[
+           // Executability
+           OnlyOnce('PDU', 'CN_reallocate_PDU_sessions')
+           , PDU_Updated(~UPF_ID, PDUNewSessions, ~ue_address, ~te_id )
+         ]->
+        [
+          St2_CN(~CN_ID, ~SRAN_ID, 5G_GUTI, RAN_UENGAP_ID, ~UPF_ID, PDUNewSessions, ~ue_address, ~te_id)
+        , St_6_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf,supi,~cid, 'endAKA')
+        , SndS(~cid_N4, ~CN_ID, ~UPF_ID, <UE_ADDRESS_Type(~ue_address), TE_ID_Type(~te_id), PDUNewSessions>)
+        ]
+
+rule UPF_receives_PDU_sessions:
+
+    [
+        RcvS(~cid_N4, ~CN_ID, ~UPF_ID, <UE_ADDRESS_Type(ue_address), TE_ID_Type(te_id), PDUNewSessions>)
+        , !UPF(~UPF_ID)
+    ]
+    --[
+        OnlyOnce('PDU', 'UPF_receives_PDU_sessions')
+        , UPF_Informed(~UPF_ID, PDUNewSessions, ue_address, te_id)
+    ]->
+    
+    [
+     St1_UPF(~UPF_ID, PDUNewSessions, ue_address, te_id)
+     , SndS(~cid_N4, ~UPF_ID, ~CN_ID, 'SessionEndPointId') //successfully updated
+    ]
+
+rule SMF_PDUSessionUpdateResponse_AMF_InitialContextSetupRequest_gNB:
+    let 
+         msgOut=<GUTI_Type(5G_GUTI), RAN_UENGAP_ID_Type(RAN_UENGAP_ID), AMF_UE_NGAP_ID_Type(~AMF_UE_NGAP_ID), PDUNewSessions, ~ue_address, ~UPF_ID, ~te_id>
+    in
+        [
+          St2_CN(~CN_ID, ~SRAN_ID, 5G_GUTI, RAN_UENGAP_ID, ~UPF_ID, PDUNewSessions, ~ue_address, ~te_id)
+        , RcvS(~cid_N4, ~UPF_ID, ~CN_ID, 'SessionEndPointId')
+        , Fr(~AMF_UE_NGAP_ID)
+        , !N2(~cid_N2, ~SRAN_ID, ~CN_ID)
+        ]
+    --[
+        OnlyOnce('PDU', 'SMF_PDUSessionUpdateResponse_AMF_InitialContextSetupRequest_gNB')
+        , UPF_Confirmed(~CN_ID, ~UPF_ID, ~SRAN_ID)
+    ]->
+    
+    [
+        St3_CN(~CN_ID, ~SRAN_ID, 5G_GUTI, RAN_UENGAP_ID, ~AMF_UE_NGAP_ID, PDUNewSessions, ~ue_address, ~te_id)
+        , SndS(~cid_N2, ~CN_ID, ~SRAN_ID, msgOut)
+    ]
+
+rule gNB_SecurityModeCommand_UE:
+    let 
+        msgIn=<GUTI_Type(5G_GUTI), RAN_UENGAP_ID_Type(~RAN_UENGAP_ID), AMF_UE_NGAP_ID_Type(AMF_UE_NGAP_ID), PDUNewSessions, ue_address, UPF_ID, te_id>
+        msgOut='SecurityConfigSMC'
+    in
+    [
+        St4_SRAN_inReg_preAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID)
+        , RcvS(~cid_N2, ~CN_ID, ~SRAN_ID, msgIn)
+    ]
+    --[
+        OnlyOnce('Registration', 'gNB_SecurityModeCommand_UE')
+       , GNB_Updated(~SRAN_ID, PDUNewSessions, ue_address, te_id)
+     ]->
+     
+    [
+        Out(<~SRAN_ID, RA_RNTI, msgOut>)
+        , St5_SRAN_inReg_postAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID, AMF_UE_NGAP_ID, PDUNewSessions, ue_address, UPF_ID, te_id)
+    ]
+
+
+rule UE_SecurityModeComplete_gNB:
+    let 
+        msgIn='SecurityConfigSMC'
+        msgOut='SecurityModeComplete'
+        K_AMF = KDF(K_seaf, ~supi)
+        K_gNB = KDF(K_AMF, 'MAX_NAS_COUNT') // MAX NAS COUNT = 2^32-1
+        NH = KDF(K_AMF, K_gNB)
+        NCC = '0'
+        
+    in
+    [
+        In(<~SRAN_ID, ~RA_RNTI, msgIn>)
+        , St4_UE_inReg_preAKA(~supi, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDUSessions)
+        , St_3_UE(~tid, ~supi, ~idHN, ~k, ~sqn_root, idSN, K_seaf) //state of UE  at the end of successful AKA
+    ]
+
+    --[
+        OnlyOnce('Registration', 'UE_SecurityModeComplete_gNB')
+        , SecurityModeCompleted_UE(~5G_GUTI, ~SRAN_ID)
+    ]->
+
+    [
+      Out(<~RA_RNTI, ~SRAN_ID, msgOut>)
+      , St5_UE_inReg_postAKA(~supi, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDUSessions, K_AMF,K_gNB, NH, NCC) //add the computed keys here...
+    ]
+
+//msg 85 
+rule gNB_RRCReconfiguration_UE:
+    let
+        msgIn='SecurityModeComplete'
+        K_AMF = KDF(K_seaf, supi)
+        K_gNB = KDF(K_AMF, 'MAX_NAS_COUNT') // MAX NAS COUNT = 2^32-1
+        NH = KDF(K_AMF, K_gNB)
+        NCC = '0'
+        
+        //encrypt the following message with the computed key
+        //add additional parameters if required
+        PDUNewSessions=<PDUSESSION_Type(pdu1, type_val2)>
+        msgOut=senc(<'RRC_Reconfig', PDUNewSessions>, K_gNB)
+    in
+    [
+        In(<RA_RNTI, ~SRAN_ID, msgIn>)
+        , St5_SRAN_inReg_postAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID, AMF_UE_NGAP_ID, PDUNewSessions, ue_address, UPF_ID, te_id)
+        , St_6_SEAF(~tid, ~idSN, SNID, conc_supi, idHN, ~RAND, RES_star, K_seaf,supi,~cid, 'endAKA')
+    ]
+    --[
+        OnlyOnce('Registration', 'gNB_RRCReconfiguration_UE')
+        , SecurityModeCompleted_SRAN(~SRAN_ID, 5G_GUTI)
+    ]->
+    
+    [
+        Out(<~SRAN_ID, RA_RNTI, msgOut>)
+        , St6_SRAN_inReg_postAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID, AMF_UE_NGAP_ID, PDUNewSessions, ue_address,  UPF_ID, te_id, K_AMF,K_gNB, NH, NCC) //add the computed keys here...
+    ]
+
+rule UE_NASRegistrationComplete_gNB:
+    let
+        PDUNewSessions=<PDUSESSION_Type(~pdu1, type_val2)>
+        msgIn=senc(<'RRC_Reconfig', PDUNewSessions>, K_gNB)
+        msgOut=senc('NASRegistrationComplete', K_gNB)
+    in
+    [
+        In(<~SRAN_ID, ~RA_RNTI, msgIn>)
+        , St5_UE_inReg_postAKA(~supi, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDUSessions, K_AMF,K_gNB, NH, NCC)
+        , UE_Org_PDUSession(~supi,   ~5G_GUTI, ~pdu1, type_val1)
+    ]
+    --[
+        OnlyOnce('Registration', 'UE_NASRegistrationComplete_gNB')
+        , NASRegistrationComplete_UE(~5G_GUTI, ~SRAN_ID)
+    ]->
+    [
+        Out(<~RA_RNTI, ~SRAN_ID, msgOut>)
+        , St6_UE_inReg_postAKA(~supi, ~CN_ID, ~5G_GUTI, ~RA_RNTI, ~SRAN_ID, C_RNTI, ~UE_ID, PDUSESSION_Type(~pdu1, type_val2), K_AMF,K_gNB, NH, NCC)
+    ]
+
+rule gNB_NASRegistrationComplete_CN:
+    let 
+        msgIn=senc('NASRegistrationComplete', K_gNB)
+        msgOut_93=<'PDUSessionDownLink', TE_ID_Type(te_id)>
+        msgOut_94=<'NASRegistrationComplete', GUTI_Type(5G_GUTI), ~SRAN_ID>
+
+    in
+    [
+        In(<RA_RNTI, ~SRAN_ID, msgIn>)
+        , St6_SRAN_inReg_postAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID, AMF_UE_NGAP_ID, PDUNewSessions, ue_address, UPF_ID, te_id, K_AMF,K_gNB, NH, NCC)
+        , !N2(~cid_N2, ~SRAN_ID, ~CN_ID)
+    ]
+    --[
+        OnlyOnce('Registration', 'gNB_NASRegistrationComplete_CN')
+        , NASRegistrationComplete_SRAN(~SRAN_ID, 5G_GUTI )
+    ]->
+    [
+        St7_SRAN_inReg_postAKA(~SRAN_ID, ~C_RNTI, RA_RNTI, UE_ID, 5G_GUTI, STMSI, ~RAN_UENGAP_ID, ~CN_ID, AMF_UE_NGAP_ID, PDUNewSessions, ue_address, UPF_ID, te_id, K_AMF,K_gNB, NH, NCC)
+        , SndS(~cid_N2, ~SRAN_ID,~CN_ID, <msgOut_93, msgOut_94>)
+    ]
+  
+
+rule CN_NASRegistrationComplete_received:
+    let 
+        msgIn_93=<'PDUSessionDownLink', TE_ID_Type(~te_id)>
+        msgIn_94=<'NASRegistrationComplete', GUTI_Type(5G_GUTI), ~SRAN_ID>
+    in
+    [
+        RcvS(~cid_N2, ~SRAN_ID,~CN_ID, <msgIn_93, msgIn_94>)
+        , !N2(~cid_N2, ~SRAN_ID, ~CN_ID)
+        , St3_CN(~CN_ID, ~SRAN_ID, 5G_GUTI, RAN_UENGAP_ID, ~AMF_UE_NGAP_ID, PDUNewSessions, ~ue_address, ~te_id)
+    ]
+    --[
+        OnlyOnce('Registration', 'CN_NASRegistrationComplete_received')
+        , NASRegistrationComplete_CN(~CN_ID, 5G_GUTI, ~SRAN_ID)
+    ]->
+    //registration complete part 2
+    []
+    
+
+
+
+/************************************/
+/*          Sources lemmas          */
+/************************************/
+
+lemma rand_autn_src [sources]:
+    " All RAND AUTN #i. Out_Src(RAND, AUTN)@i
+        ==> (Ex #j. Src(RAND, AUTN)@j & j < i)
+            | (Ex #j x1 x2. Injected(<'aia', <RAND, x1, x2, AUTN>>)@j & j < i) "
+
+
+/************************************/
+/*          Helper lemmas           */
+/************************************/
+
+lemma sqn_ue_src [use_induction, reuse]:
+    " All supi HN Sqn sqn_root count #i.
+        Sqn_UE_Invariance(supi, HN, Sqn, sqn_root, count)@i
+            ==> (Ex #j. Sqn_Create(supi, HN, sqn_root)@j & j < i) "
+
+lemma sqn_hss_src [reuse]:
+    " All HN supi Sqn sqn_root count #i.
+        Sqn_HSS_Invariance(HN, supi, Sqn, sqn_root, count)@i
+            ==> (Ex #j. Sqn_Create(supi, HN, sqn_root)@j & j < i) "
+
+lemma sqn_ue_nodecrease [use_induction, reuse]:
+    " (All supi HN Sqni Sqnj #i #j.
+        (Sqn_UE_Change(supi, HN, Sqnj)@j &
+         Sqn_UE_Change(supi, HN, Sqni)@i &
+         i < j) ==> (Ex dif. Sqnj = Sqni + dif)) &
+      (All supi HN Sqni Sqnj #i #j.
+        (Sqn_UE_Change(supi, HN, Sqnj)@j &
+         Sqn_UE_Nochange(supi, HN, Sqni)@i &
+         i < j) ==> (Ex dif. Sqnj = Sqni + dif)) &
+      (All supi HN Sqni Sqnj #i #j.
+        (Sqn_UE_Nochange(supi, HN, Sqnj)@j &
+         Sqn_UE_Change(supi, HN, Sqni)@i &
+         i < j) ==> ((Sqnj = Sqni) | (Ex dif. Sqnj = Sqni + dif))) &
+      (All supi HN Sqni Sqnj #i #j.
+        (Sqn_UE_Nochange(supi, HN, Sqnj)@j &
+         Sqn_UE_Nochange(supi, HN, Sqni)@i &
+         i < j) ==> ((Sqnj = Sqni) | (Ex dif. Sqnj = Sqni + dif))) "
+
+lemma sqn_ue_unique [reuse, hide_lemma=sqn_ue_src, hide_lemma=sqn_hss_src]:
+    " All supi HN Sqn #i #j.
+        Sqn_UE_Use(supi, HN, Sqn)@i & Sqn_UE_Use(supi, HN, Sqn)@j
+            ==> #i = #j "
+
+lemma NotSecret_C_RNTI: exists-trace
+" Ex UE_ID C_RNTI #t01 #t02 .
+    CreateUEID(UE_ID, C_RNTI) @ t01
+    &
+    KU(C_RNTI) @ t02
+    &
+    (All type event #i #j . OnlyOnce(type, event) @ i & OnlyOnce(type, event) @ j ==> #i=#j)
+    &
+    not( Ex B #k . Rev(B,'secureChannel') @ k) 
+"
+lemma Secret_C_RNTI:
+" All UE_ID C_RNTI #t01 . 
+      CreateUEID(UE_ID, C_RNTI) @ t01 
+      &
+      not( Ex B #k . Rev(B,'secureChannel') @ k)
+      ==> 
+      not (Ex #t02 . KU(C_RNTI) @ t02)
+"
+
+
+//Sanity-check - 2 UPFs at most
+
+lemma AtMostTwoUPFs:
+"All p q r #i #j #k .
+ UserPlaneFunction(p) @ i & UserPlaneFunction(q) @ j & UserPlaneFunction(r) @ k
+ ==>
+ (p=q) | (p=r) | (q=r)
+"
+
+
+/************************************/
+/*      Correctness lemmas          */
+/************************************/
+
+
+// This lemma shows a normal execution without resync.
+lemma executability_honest: exists-trace
+" Ex #i. SEAF_End()@i
+        & not (Ex X data #r. Rev(X,data)@r)
+        & (All type event #j #k . OnlyOnce(type, event)@j & OnlyOnce(type, event)@k ==> #j = #k)
+"
+
+// This lemma shows a normal execution without resync. but with key confirmation
+lemma executability_keyConf_honest: exists-trace
+" Ex #i. SEAF_EndConf()@i
+        & not (Ex X data #r. Rev(X,data)@r)
+        & (All supi HN sqn_root #i. Sqn_Create(supi, HN, sqn_root)@i
+                ==> not (Ex #j. K(sqn_root)@j))
+        & (All type event #j #k . OnlyOnce(type, event)@j & OnlyOnce(type, event)@k ==> #j = #k)
+"
+
+// This lemma shows a normal execution with a MAC failure
+lemma executability_macfailure: exists-trace
+" Ex supi #i. MACFailure(supi)@i
+        & not (Ex X data #r. Rev(X,data)@r)
+        & (All type event #j #k . OnlyOnce(type, event)@j & OnlyOnce(type, event)@k ==> #j = #k)
+"
+
+lemma executability_desync:
+    exists-trace
+    " Ex dif #i.
+        HSS_Resync_End(dif)@i
+        & not (Ex X data #r. Rev(X,data)@r)
+        & (All supi HN sqn_root #i. Sqn_Create(supi, HN, sqn_root)@i
+                ==> not (Ex #j. K(sqn_root)@j))
+        & (All HN1 HN2 #j #k. HomeNet(HN1)@j &
+                      HomeNet(HN2)@k ==> #j = #k)
+        & (All S1 S2 HN1 HN2 #j #k. Subscribe(S1, HN1)@j &
+                        Subscribe(S2, HN2)@k ==> #j = #k)
+        & (All SNID1 SNID2 #j #k. Start_SEAF_Session(SNID1)@j &
+                          Start_SEAF_Session(SNID2)@k ==> #j = #k) 
+        & (All UE1 UE2 #j #k. Start_UE_Session(UE1)@j &
+                          Start_UE_Session(UE2)@k ==> #j = #k) 
+        & (All #j #k. Sqn_UE_Desync()@j & Sqn_UE_Desync()@k ==> #j = #k)
+        & (All HN1 HN2 #j #k. Start_HSS_Session(HN1)@j &
+                      Start_HSS_Session(HN2)@k ==> #j = #k)
+        & (All #j #k . OnlyOnce('Reg','UE_SendPreamable')@j & OnlyOnce('Reg', 'UE_SendPreamable')@k ==> #j = #k)
+"
+
+lemma executability_resync:
+    exists-trace
+    " Ex #i1 #i2 #i3 #i4 X.
+          Start_HSS_Session(X)@i1
+        & HSS_Resync_End('1'+'1'+'1'+'1')@i2
+        & Start_HSS_Session(X)@i3
+        & HSS_End()@i4
+        & #i1 < #i2
+        & #i2 < #i3
+        & #i3 < #i4
+        & not (Ex X data #r. Rev(X,data)@r)
+        & (All #j #k. Sqn_UE_Desync()@j & Sqn_UE_Desync()@k ==> #j = #k)
+        & (All a b #j #k. HSS_Resync_End(a)@j & HSS_Resync_End(b)@k ==> #j = #k)
+        & (All #j #k #l. HSS_Send_Aia()@j &
+                 HSS_Send_Aia()@k &
+                 HSS_Send_Aia()@l &
+                 not #j = #k ==> (#j = #l | #k = #l))
+        & (All #j #k. HSS_End()@j & HSS_End()@k ==> #j = #k)
+        & (All supi HN sqn_root #i. Sqn_Create(supi, HN, sqn_root)@i
+                ==> not (Ex #j. KU(sqn_root)@j))
+        & (All HN1 HN2 #j #k. HomeNet(HN1)@j &
+                      HomeNet(HN2)@k ==> #j = #k)
+        & (All SN1 SN2 #j #k. ServNet(SN1)@j &
+                      ServNet(SN2)@k ==> #j = #k)
+        & (All S1 S2 H1 H2 sqn_root1 sqn_root2 #k #j.
+                Sqn_Create(S1, H1, sqn_root1)@j &
+                Sqn_Create(S2, H2, sqn_root2)@k ==> #j = #k)
+        & (All UE1 UE2 UE3 #j #k #l. Start_UE_Session(UE1)@j &
+                     Start_UE_Session(UE2)@k &
+                     Start_UE_Session(UE3)@l &
+                 not #j = #k ==> (#j = #l | #k = #l)) 
+        & (All HN1 HN2 HN3 #j #k #l. Start_HSS_Session(HN1)@j &
+                     Start_HSS_Session(HN2)@k &
+                     Start_HSS_Session(HN3)@l &
+                 not #j = #k ==> (#j = #l | #k = #l)) 
+        & (All SNID1 SNID2 SNID3 #j #k #l. Start_SEAF_Session(SNID1)@j &
+                     Start_SEAF_Session(SNID2)@k &
+                     Start_SEAF_Session(SNID3)@l &
+                 not #j = #k ==> (#j = #l | #k = #l))
+//        & (All #j #k . OnlyOnce('UE_SendPreamable')@j & OnlyOnce('UE_SendPreamable')@k ==> #j = #k)
+"
+
+//this shows the honest gNB successfully using a UPF that has no filtering enabled
+lemma Correctness_UE_Reg_AKA_Honest: exists-trace
+"Ex SUPI SRAN_ID C_RNTI UE_ID 5G_GUTI SN_ID HN_ID msgOutSendAuthReq msgOutAuthResp SUCI KSEAF
+    UPF_ID PDUNewSessions ue_address te_id CN_ID
+    #t01 #t02 #t03 #t04 #t05 #t06 #t07 #t08 #t09 #t10 #t11 #t12 #t13 
+    #t14 #t15 #t16 #t17 #t18 #t19 #t20 #t21 #t22 #t23 #t24 #t25 #t26
+    #t27 
+.
+    SendPreamble(SUPI, SRAN_ID) @ t01
+    &
+    SendCRNTI(SRAN_ID, C_RNTI) @ t02
+    &
+    CreateUEID(UE_ID, C_RNTI) @ t03
+    &
+    RRCSetupComplete(SRAN_ID, C_RNTI, UE_ID) @ t04
+    &
+    NASRegReq(SUPI, 5G_GUTI) @ t05
+    &
+    AMFSelection(SRAN_ID, 5G_GUTI) @ t06
+    &
+    AMF_RequestID(SRAN_ID, 5G_GUTI) @ t07
+    &
+    FwdIdentityReq(SRAN_ID, 5G_GUTI) @ t08
+    &
+    Start_UE_Session(SUPI) @ t09
+    &
+    Start_SEAF_Session(SN_ID) @t10
+    &
+    Start_HSS_Session(HN_ID) @t11
+    &
+    SendAuthReq(msgOutSendAuthReq) @t12
+    &
+    SendAuthResp(msgOutAuthResp) @t13
+    & 
+    SendSuci(SUCI) @t14
+    &
+    SendSupi(SUPI, SUCI) @t15
+    &
+    SEAF_SEnds(KSEAF)@t16
+    &
+    UE_Receives(KSEAF)@t17
+    &
+    SEAF_EndConf()@t18
+    &
+    PDU_Updated(UPF_ID, PDUNewSessions, ue_address, te_id )@ t19
+    &
+    UPF_Informed(UPF_ID, PDUNewSessions, ue_address, te_id) @ t20
+    &
+    UPF_Confirmed(CN_ID, UPF_ID, SRAN_ID) @ t21
+    &
+    GNB_Updated(SRAN_ID, PDUNewSessions, ue_address, te_id) @ t22
+    &
+    SecurityModeCompleted_UE(5G_GUTI, SRAN_ID) @ t23
+    &
+    SecurityModeCompleted_SRAN(SRAN_ID, 5G_GUTI) @ t24
+    &
+    NASRegistrationComplete_UE(5G_GUTI, SRAN_ID) @ t25
+    &
+    NASRegistrationComplete_SRAN(SRAN_ID, 5G_GUTI ) @ t26
+    &
+    NASRegistrationComplete_CN(CN_ID, 5G_GUTI, SRAN_ID) @ t27
+    &
+    #t01<#t02
+    &
+    #t02<#t03
+    &
+    #t03<#t04
+    &
+    #t04<#t05
+    &
+    #t05<#t06
+    &
+    #t06<#t07
+    &
+    #t07<#t08
+    &
+    #t08<#t09
+    &
+    #t09<#t10
+    &
+    #t10<#t11
+    &
+    #t11<#t12
+    &
+    #t12<#t13
+    &
+    #t13<#t14
+    &
+    #t14<#t15
+    &
+    #t15<#t16
+    &
+    #t16<#t17
+    &
+    #t17<#t18
+    &
+    #t18<#t19
+    &
+    #t19<#t20
+    &
+    #t20<#t21
+    &
+    #t21<#t22
+    &
+    #t22<#t23
+    &
+    #t23<#t24
+    &
+    #t24<#t25
+    &
+    #t25<#t26
+    &
+    #t26<#t27
+    &
+    (All type event #i #j . OnlyOnce(type, event) @ i & OnlyOnce(type, event) @ j ==> #i=#j)
+    //we had no key reveal ever
+    & not( Ex X data #r. Rev(X, data)@r) 
+"
+
+
+/*
+In order to prove the next lemma, uncomment it and prove it on its own using:
+
+time tamarin-prover-160 Registration5G_AKA_Honest.spthy  --heuristic=O --oraclename=oracle.py --prove=anonymous*  +RTS -N20 -RTS && date
+
+otherwise Tamarin runs out of memory when it attempts to prove all lemmas in this model.
+
+lemma anonymous_injectiveagreement_ue_seaf_kseaf_noKeyRev_noChanRev [hide_lemma=sqn_ue_src, hide_lemma=sqn_hss_src, hide_lemma=sqn_ue_nodecrease]:
+    " All a b t #i. Commit(a,b,<'UE','SEAF',<'K_Seaf', t>>)@i
+            ==> (Ex #j. Running_anonymous(b,<'UE','SEAF',<'K_Seaf', t>>)@j 
+                 & j < i
+                 & not (Ex a2 b2 #i2. Commit(a2,b2,<'UE','SEAF',<'K_Seaf', t>>)@i2
+                            & not (#i2 = #i)))
+                        | (Ex X key #r. Rev(X, <'k',key>)@r & Honest(X)@i)
+                            | (Ex X #r. Rev(X, 'secureChannel')@r & Honest(X)@i) "
+*/
+end
